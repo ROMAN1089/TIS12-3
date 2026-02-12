@@ -18,7 +18,7 @@ class TokenValidator:
     
     async def __call__(
         self,
-        x_service_token: Annotated[str, Header()] = None
+        x_service_token: Annotated[str | None, Header()] = None
     ) -> str:
         """
         Validate the X-Service-Token header.
