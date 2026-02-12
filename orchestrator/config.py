@@ -2,15 +2,20 @@
 Configuration module using Pydantic Settings.
 Reads all URLs, ports, and tokens from .env file.
 """
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pathlib import Path
 from typing import Optional
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
     
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(ENV_FILE),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore"

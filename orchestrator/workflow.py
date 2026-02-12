@@ -82,9 +82,18 @@ class MultiAgentWorkflow:
                     f"Step 2.{idx}: Executing subtask {idx}/{len(subtasks)}"
                 )
                 
+                executor_input = {
+                    "task_id": subtask.get("id", f"{workflow_id}-subtask-{idx}"),
+                    "description": subtask.get("description", ""),
+                    "data": {
+                        "dependencies": subtask.get("dependencies", []),
+                        "estimated_duration": subtask.get("estimated_duration"),
+                    },
+                }
+
                 execution_result = await workflow.execute_activity(
                     AgentActivities.call_executor,
-                    subtask,
+                    executor_input,
                     **activity_options
                 )
                 
@@ -99,9 +108,13 @@ class MultiAgentWorkflow:
             logger.info(f"[INFO] Workflow-ID: {workflow_id} | Step 3: Validating results")
             
             validation_input = {
-                "original_task": task_input,
-                "decomposed_tasks": decomposed_tasks,
-                "execution_results": execution_results,
+                "task_id": task_input.get("task_id", workflow_id),
+                "description": "Validate workflow results",
+                "data": {
+                    "original_task": task_input,
+                    "decomposed_tasks": decomposed_tasks,
+                    "execution_results": execution_results,
+                },
             }
             
             validation_result = await workflow.execute_activity(
