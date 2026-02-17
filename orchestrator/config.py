@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     temporal_namespace: str = "default"
     temporal_task_queue: str = "multi-agent-orchestrator"
     
-    # Agent URLs
+    # Agent URLs (New unified endpoint)
     decomposer_agent_url: str = "http://decomposer:8001"
     executor_agent_url: str = "http://executor:8002"
     validator_agent_url: str = "http://validator:8003"
@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     decomposer_token: Optional[str] = None
     executor_token: Optional[str] = None
     validator_token: Optional[str] = None
+    
+    # S3/MinIO configuration for artifact storage
+    s3_endpoint: str = "http://localhost:9000"
+    s3_access_key: str = "minioadmin"
+    s3_secret_key: str = "minioadmin"
+    s3_bucket: str = "agent-artifacts"
+    s3_region: str = "us-east-1"
     
     # Timeouts (in seconds)
     activity_start_to_close_timeout: int = 300
