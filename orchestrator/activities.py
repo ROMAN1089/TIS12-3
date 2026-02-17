@@ -1,12 +1,15 @@
 """
 Temporal Activities for calling external agents.
 Implements network calls with timeouts, authentication headers, and proper error handling.
+Updated to work with the new agent API using /generate endpoint and S3 artifact storage.
 """
 import logging
 from typing import Dict, Any
 from datetime import timedelta
 
 import httpx
+import boto3
+from botocore.exceptions import ClientError
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
@@ -14,6 +17,50 @@ from .config import settings
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# --- S3 CLIENT SETUP ---
+s3_client = boto3.client(
+    's3',
+    endpoint_url=settings.s3_endpoint,
+    aws_access_key_id=settings.s3_access_key,
+    aws_secret_access_key=settings.s3_secret_key,
+    region_name=settings.s3_region
+)
+
+
+def download_artifact_from_s3(s3_key: str) -> str:
+    """Download artifact content from S3."""
+    try:
+        obj = s3_client.get_object(Bucket=settings.s3_bucket, Key=s3_key)
+        content = obj['Body'].read().decode('utf-8')
+        logger.info(f"Downloaded artifact from S3: {s3_key}")
+        return content
+    except ClientError as e:
+        logger.error(f"Failed to download artifact {s3_key}: {e}")
+        raise Exception(f"S3 download error: {str(e)}")
+
+
+def upload_context_to_s3(content: str, context_name: str) -> str:
+    """Upload context data to S3 and return the S3 key."""
+    import uuid
+    from datetime import datetime
+    
+    unique_id = uuid.uuid4().hex[:8]
+    timestamp = datetime.now().strftime("%Y%m%d")
+    s3_key = f"context/{timestamp}_{unique_id}_{context_name}.json"
+    
+    try:
+        s3_client.put_object(
+            Bucket=settings.s3_bucket,
+            Key=s3_key,
+            Body=content.encode('utf-8'),
+            ContentType='application/json'
+        )
+        logger.info(f"Uploaded context to S3: {s3_key}")
+        return s3_key
+    except ClientError as e:
+        logger.error(f"Failed to upload context to S3: {e}")
+        raise Exception(f"S3 upload error: {str(e)}")
 
 
 class AgentActivities:
@@ -28,7 +75,7 @@ class AgentActivities:
             task_data: Input data for the decomposer
             
         Returns:
-            Response from the decomposer agent
+            Response from the decomposer agent with artifact reference
             
         Raises:
             ApplicationError: For validation errors (400) - non-retryable
@@ -37,13 +84,51 @@ class AgentActivities:
         workflow_id = activity.info().workflow_id
         logger.info(f"[INFO] Workflow-ID: {workflow_id} | Action: Calling Decomposer")
         
-        return await self._call_agent(
+        # Prepare request for new agent API
+        input_data = f"Task: {task_data.get('description', '')}\nData: {task_data.get('data', {})}"
+        
+        agent_request = {
+            "input_data": input_data,
+            "context_keys": None,
+            "system_prompt_override": None
+        }
+        
+        response = await self._call_agent(
             agent_name="decomposer",
             url=settings.decomposer_agent_url,
-            endpoint="/decompose",
-            data=task_data,
+            data=agent_request,
             workflow_id=workflow_id
         )
+        
+        # Download the artifact from S3
+        artifact = response.get("artifact", {})
+        s3_key = artifact.get("s3_key")
+        
+        if s3_key:
+            content = download_artifact_from_s3(s3_key)
+            # Parse JSON content for decomposer
+            import json
+            try:
+                decomposed_data = json.loads(content)
+                return {
+                    "subtasks": decomposed_data.get("tasks", []),
+                    "total_subtasks": len(decomposed_data.get("tasks", [])),
+                    "status": "success",
+                    "artifact_s3_key": s3_key
+                }
+            except json.JSONDecodeError:
+                logger.error(f"Failed to parse JSON from artifact: {content[:100]}")
+                raise ApplicationError(
+                    "Invalid JSON in decomposer response",
+                    non_retryable=True,
+                    type="ParseError"
+                )
+        else:
+            raise ApplicationError(
+                "No artifact returned from decomposer",
+                non_retryable=True,
+                type="MissingArtifact"
+            )
     
     @activity.defn(name="call_executor")
     async def call_executor(self, execution_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -54,7 +139,7 @@ class AgentActivities:
             execution_data: Input data for the executor
             
         Returns:
-            Response from the executor agent
+            Response from the executor agent with artifact reference
             
         Raises:
             ApplicationError: For validation errors (400) - non-retryable
@@ -63,13 +148,41 @@ class AgentActivities:
         workflow_id = activity.info().workflow_id
         logger.info(f"[INFO] Workflow-ID: {workflow_id} | Action: Calling Executor")
         
-        return await self._call_agent(
+        # Prepare request for new agent API
+        input_data = f"Subtask ID: {execution_data.get('task_id', '')}\nDescription: {execution_data.get('description', '')}"
+        
+        agent_request = {
+            "input_data": input_data,
+            "context_keys": None,
+            "system_prompt_override": None
+        }
+        
+        response = await self._call_agent(
             agent_name="executor",
             url=settings.executor_agent_url,
-            endpoint="/execute",
-            data=execution_data,
+            data=agent_request,
             workflow_id=workflow_id
         )
+        
+        # Download the artifact from S3
+        artifact = response.get("artifact", {})
+        s3_key = artifact.get("s3_key")
+        
+        if s3_key:
+            content = download_artifact_from_s3(s3_key)
+            return {
+                "task_id": execution_data.get("task_id", ""),
+                "result": {"output": content},
+                "duration": 0,
+                "status": "success",
+                "artifact_s3_key": s3_key
+            }
+        else:
+            raise ApplicationError(
+                "No artifact returned from executor",
+                non_retryable=True,
+                type="MissingArtifact"
+            )
     
     @activity.defn(name="call_validator")
     async def call_validator(self, validation_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -80,7 +193,7 @@ class AgentActivities:
             validation_data: Input data for the validator
             
         Returns:
-            Response from the validator agent
+            Response from the validator agent with artifact reference
             
         Raises:
             ApplicationError: For validation errors (400) - non-retryable
@@ -89,40 +202,91 @@ class AgentActivities:
         workflow_id = activity.info().workflow_id
         logger.info(f"[INFO] Workflow-ID: {workflow_id} | Action: Calling Validator")
         
-        return await self._call_agent(
+        # Prepare context data for validation
+        import json
+        context_data = json.dumps({
+            "original_task": validation_data.get("data", {}).get("original_task", {}),
+            "decomposed_tasks": validation_data.get("data", {}).get("decomposed_tasks", {}),
+            "execution_results": validation_data.get("data", {}).get("execution_results", [])
+        })
+        
+        # Upload context to S3
+        context_s3_key = upload_context_to_s3(context_data, "validation_context")
+        
+        # Prepare request for new agent API
+        input_data = f"Validate the following workflow execution results"
+        
+        agent_request = {
+            "input_data": input_data,
+            "context_keys": {"validation_data": context_s3_key},
+            "system_prompt_override": None
+        }
+        
+        response = await self._call_agent(
             agent_name="validator",
             url=settings.validator_agent_url,
-            endpoint="/validate",
-            data=validation_data,
+            data=agent_request,
             workflow_id=workflow_id
         )
+        
+        # Download the artifact from S3
+        artifact = response.get("artifact", {})
+        s3_key = artifact.get("s3_key")
+        
+        if s3_key:
+            content = download_artifact_from_s3(s3_key)
+            # Try to parse as JSON for validation results
+            try:
+                validation_result = json.loads(content)
+                return {
+                    "is_valid": validation_result.get("is_valid", True),
+                    "score": validation_result.get("score", 1.0),
+                    "issues": validation_result.get("issues", []),
+                    "status": "success",
+                    "artifact_s3_key": s3_key
+                }
+            except json.JSONDecodeError:
+                # If not JSON, treat as text validation report
+                return {
+                    "is_valid": True,
+                    "score": 1.0,
+                    "issues": [],
+                    "status": "success",
+                    "validation_report": content,
+                    "artifact_s3_key": s3_key
+                }
+        else:
+            raise ApplicationError(
+                "No artifact returned from validator",
+                non_retryable=True,
+                type="MissingArtifact"
+            )
     
     async def _call_agent(
         self,
         agent_name: str,
         url: str,
-        endpoint: str,
         data: Dict[str, Any],
         workflow_id: str
     ) -> Dict[str, Any]:
         """
         Internal method to call an agent with proper authentication and error handling.
+        Updated to use /generate endpoint.
         
         Args:
             agent_name: Name of the agent (for token lookup)
             url: Base URL of the agent service
-            endpoint: API endpoint path
-            data: Request payload
+            data: Request payload (AgentRequest format)
             workflow_id: Current workflow ID for logging
             
         Returns:
-            Response from the agent
+            Response from the agent (AgentResponse format)
             
         Raises:
             ApplicationError: For client errors (400-499) - non-retryable
             Exception: For server errors (500+) - retryable
         """
-        full_url = f"{url}{endpoint}"
+        full_url = f"{url}/generate"
         token = settings.get_agent_token(agent_name)
         
         headers = {
