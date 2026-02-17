@@ -85,12 +85,11 @@ class AgentActivities:
         logger.info(f"[INFO] Workflow-ID: {workflow_id} | Action: Calling Decomposer")
         
         # Prepare request for new agent API
-        input_data = f"Task: {task_data.get('description', '')}\nData: {task_data.get('data', {})}"
+        import json
+        input_data = f"Task: {task_data.get('description', '')}\nData: {json.dumps(task_data.get('data', {}))}"
         
         agent_request = {
-            "input_data": input_data,
-            "context_keys": None,
-            "system_prompt_override": None
+            "input_data": input_data
         }
         
         response = await self._call_agent(
@@ -149,12 +148,16 @@ class AgentActivities:
         logger.info(f"[INFO] Workflow-ID: {workflow_id} | Action: Calling Executor")
         
         # Prepare request for new agent API
-        input_data = f"Subtask ID: {execution_data.get('task_id', '')}\nDescription: {execution_data.get('description', '')}"
+        import json
+        subtask_info = {
+            "task_id": execution_data.get('task_id', ''),
+            "description": execution_data.get('description', ''),
+            "data": execution_data.get('data', {})
+        }
+        input_data = f"Subtask Information:\n{json.dumps(subtask_info, indent=2)}"
         
         agent_request = {
-            "input_data": input_data,
-            "context_keys": None,
-            "system_prompt_override": None
+            "input_data": input_data
         }
         
         response = await self._call_agent(
@@ -208,18 +211,17 @@ class AgentActivities:
             "original_task": validation_data.get("data", {}).get("original_task", {}),
             "decomposed_tasks": validation_data.get("data", {}).get("decomposed_tasks", {}),
             "execution_results": validation_data.get("data", {}).get("execution_results", [])
-        })
+        }, indent=2)
         
         # Upload context to S3
         context_s3_key = upload_context_to_s3(context_data, "validation_context")
         
         # Prepare request for new agent API
-        input_data = f"Validate the following workflow execution results"
+        input_data = "Validate the following workflow execution results"
         
         agent_request = {
             "input_data": input_data,
-            "context_keys": {"validation_data": context_s3_key},
-            "system_prompt_override": None
+            "context_keys": {"validation_data": context_s3_key}
         }
         
         response = await self._call_agent(
